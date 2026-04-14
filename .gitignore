@@ -43,3 +43,6 @@ migrate_working_dir/
 /ios/Frameworks/libmpv.xcframework/
 /ios/Frameworks/libmpv_xcframework.zip
 /android/src/main/jniLibs/
+
+# FVM Version Cache
+.fvm/

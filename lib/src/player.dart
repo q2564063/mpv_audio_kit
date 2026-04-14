@@ -62,7 +62,7 @@ class Player extends _PlayerBase
   // --- Public Specialized API ---
 
   /// Opens a [Media] and optionally starts playback immediately.
-  Future<void> open(Media media, {bool? play}) async {
+  Future<void> open(Media media, {bool? play, Duration? startPosition}) async {
     _checkNotDisposed();
     _mediaCache.clear();
     _mediaCache[media.uri] = media;
@@ -75,7 +75,12 @@ class Player extends _PlayerBase
     final normalizedUri = await AndroidHelper.normalizeUri(media.uri);
     _mediaCache[normalizedUri] = media;
     _pendingPlay = play ?? configuration.autoPlay;
-    _command(['loadfile', normalizedUri, 'replace']);
+    final args = ['loadfile', normalizedUri, 'replace'];
+    if (startPosition != null && startPosition > Duration.zero) {
+      final secs = (startPosition.inMilliseconds / 1000.0).toStringAsFixed(3);
+      args.addAll(['-1', 'start=$secs']);
+    }
+    _command(args);
   }
 
   /// Opens a list of [Media] items as the new playlist, optionally starting at [index].

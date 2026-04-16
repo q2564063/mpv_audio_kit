@@ -516,27 +516,14 @@ abstract class _PlayerBase {
   // --- Internal State Pipeline ---
 
   void _patchState(PlayerState Function(PlayerState) updater) {
-    final completedBefore = _state.completed;
     _state = updater(_state);
-    _emitCompletedIfChanged(completedBefore);
   }
 
   /// Updates state and notifies a specific controller.
   void _updateState<T>(PlayerState Function(PlayerState) updater,
       StreamController<T> ctrl, T newValue) {
-    final completedBefore = _state.completed;
     _state = updater(_state);
     ctrl.add(newValue);
-    _emitCompletedIfChanged(completedBefore);
-  }
-
-  void _emitCompletedIfChanged(bool completedBefore) {
-    if (_disposed) {
-      return;
-    }
-    if (_state.completed != completedBefore) {
-      _completedCtrl.add(_state.completed);
-    }
   }
 
   void _updateAudioParams(AudioParams Function(AudioParams) updater) {
@@ -580,8 +567,7 @@ abstract class _PlayerBase {
       // instead of clamping -1 to 0, which would incorrectly mark the first item.
       final idx = currentIndex >= 0
           ? currentIndex
-          : _state.playlist.index
-              .clamp(0, medias.isEmpty ? 0 : medias.length - 1);
+          : _state.playlist.index.clamp(0, medias.isEmpty ? 0 : medias.length - 1);
       final playlist = Playlist(medias, index: idx);
       _patchState((s) => s.copyWith(playlist: playlist));
       _playlistCtrl.add(playlist);

@@ -29,7 +29,7 @@ Add `mpv_audio_kit` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  mpv_audio_kit: ^0.0.7
+  mpv_audio_kit: ^0.0.8
 ```
 
 ### Platform Requirements
@@ -120,7 +120,8 @@ dependencies:
         *   [9.3 Audio Hardware Streams](#93-audio-hardware-streams)
         *   [9.4 DSP & Filter Streams](#94-dsp--filter-streams)
         *   [9.5 Network Streams](#95-network-streams)
-        *   [9.6 Complete State Snapshot](#96-complete-state-snapshot)
+        *   [9.6 Prefetch Lifecycle Stream](#96-prefetch-lifecycle-stream)
+        *   [9.7 Complete State Snapshot](#97-complete-state-snapshot)
     *   [10. Raw API](#10-raw-api)
         *   [10.1 Read a Property](#101-read-a-property)
         *   [10.2 Write a Property](#102-write-a-property)
@@ -189,7 +190,7 @@ The following images demonstrate the example app included in the `example/` dire
 - 📜 **Dynamic Playlist**: Add, remove, move, and replace tracks at runtime without stopping playback.
 - ⚙️ **Audiophile Hardware**: Exclusive mode (WASAPI/ALSA/CoreAudio), output device selection, sample rate and format forcing.
 - 🔍 **Metadata & Cover Art**: Native extraction of embedded cover images and metadata tags.
-- 🌐 **Network Streams**: HLS, RTSP, RTMP, SMB, SHOUTcast/Icecast, and any format libmpv supports — with native HTTP headers.
+- 🌐 **Network Streams**: HLS, DASH, RTSP, RTMP, SMB, SHOUTcast/Icecast, and any format libmpv supports — with native HTTP headers.
 - 🪝 **Stream Hooks**: Intercept mpv's file-loading pipeline via `on_load` to lazily resolve URLs, redirect streams, or inject per-file headers.
 - 📦 **Granular Caching**: Fine-tuned control over demuxer memory pool, disk overflow cache, and cache-pause behavior.
 - 🔧 **Raw Access**: Read and write any mpv property directly, or send any mpv command.
@@ -332,6 +333,7 @@ final content = Media('content://com.android.externalstorage.documents/...');
 | `rtmp://` | Real-Time Messaging Protocol (live streaming) |
 | `smb2://` | SMB2/3 network shares (Samba/CIFS via libsmb2) |
 | `hls://` / `m3u8` | HTTP Live Streaming (HLS), as used by Jellyfin transcoding |
+| `mpd` | Dynamic Adaptive Streaming over HTTP (DASH), as used by Plex transcoding |
 | Any URL | libmpv accepts any scheme it has a protocol handler for |
 
 #### 2.2 HTTP Headers
@@ -1039,7 +1041,56 @@ player.stream.cacheSecs.listen((secs) { ... });          // double
 player.stream.networkTimeout.listen((t) { ... });        // double
 ```
 
-#### 9.6 Complete State Snapshot
+#### 9.6 Prefetch Lifecycle Stream
+
+mpv pre-opens the next playlist entry in the background to make the transition between tracks gapless. Upstream this lifecycle is tracked internally across several `MPContext` fields but never exposed through the client API — the only native hint is a handful of `MP_VERBOSE` log lines, which is brittle to act on.
+
+`mpv_audio_kit` ships a small mpv patch (`patch_prefetch_state`) that adds a proper read-only property `prefetch-state`, surfaced as a typed stream in the Dart API. The signal comes from mpv's own state — works uniformly across every demuxer backend (HLS, DASH, raw HTTP range reads, SMB, local files) without any URL parsing or log scraping.
+
+```dart
+player.stream.prefetchState.listen((state) {
+  switch (state) {
+    case MpvPrefetchState.idle:
+      // No background prefetch in progress.
+    case MpvPrefetchState.loading:
+      // prefetch_next() fired: the opener thread is creating the
+      // demuxer for the next item and the secondary cache is filling.
+      showIndicator('Prefetching…');
+    case MpvPrefetchState.ready:
+      // Secondary demuxer is open AND its reader reports idle
+      // (= cache-secs reached, no segment fetches outstanding).
+      // Gapless is armed.
+      showIndicator('Ready');
+    case MpvPrefetchState.used:
+      // Edge-trigger: the track just transitioned gaplessly.
+      // Fires once and then immediately returns to `idle`.
+      showIndicator('Using prefetched');
+  }
+});
+```
+
+State-machine reference:
+
+| State | When it fires | Notes |
+| :--- | :--- | :--- |
+| `idle` | Default, and after every cancel / drop | Also fires immediately after `used` so the transient can be one-shot |
+| `loading` | `prefetch_next()` → opener thread running | Persists until the demuxer is open and the reader goes idle |
+| `ready` | Secondary demuxer is open + reader idle | Detected by polling `demux_reader_state.idle` inside `handle_update_cache` |
+| `used` | The "Using prefetched/prefetching URL" code path hit | Edge-triggered — pairs with the subsequent `idle` |
+
+Typical happy-path sequence for a gapless transition:
+
+```
+idle → loading → ready → used → idle
+```
+
+For a dropped prefetch (e.g. demuxer options changed mid-flight):
+
+```
+idle → loading → idle
+```
+
+#### 9.7 Complete State Snapshot
 
 ```dart
 final s = player.state;
@@ -1213,6 +1264,8 @@ Common hook names:
 | `on_load` | Before a stream is opened — can redirect the URL |
 | `on_load_fail` | After a stream fails to open |
 | `on_preloaded` | After the file is pre-loaded but before playback starts |
+
+> **Hooks fire during prefetch too.** Upstream mpv's `prefetch_next()` bypasses the hook pipeline and opens the next playlist entry's raw URL directly — so `on_load` would never see prefetched tracks. `mpv_audio_kit` ships a patched `prefetch_next()` that runs `on_load` synchronously on the core thread before the opener thread starts, with a re-entry guard and demuxer NULL-mask so the `stream-open-filename` property setter accepts hook-driven rewrites while the previous track is still playing. This means custom URL schemes (e.g. `plex-transcode://` → resolved HLS URL) are resolved for **every** track, including the one being prefetched in the background — your listener is called once per track regardless of whether playback is active or prefetching.
 
 #### 12.2 Listening and Continuing
 

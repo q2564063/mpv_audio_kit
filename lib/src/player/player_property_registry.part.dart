@@ -124,6 +124,11 @@ mixin _PropertyRegistry on _PlayerBase {
       case 'audio-samplerate':
         _updateState((s) => s.copyWith(audioSampleRate: value),
             _audioSampleRateCtrl, value);
+      case 'eof-reached':
+        if (flag != _state.completed) {
+          _updateState(
+              (s) => s.copyWith(completed: flag), _completedCtrl, flag);
+        }
     }
   }
 
@@ -294,6 +299,9 @@ mixin _PropertyRegistry on _PlayerBase {
     _observe('audio-display', MpvFormat.mpvFormatString, 63);
     _observe('cover-art-auto', MpvFormat.mpvFormatString, 64);
     _observe('image-display-duration', MpvFormat.mpvFormatString, 65);
+
+    // Completion
+    _observe('eof-reached', MpvFormat.mpvFormatFlag, 68);
 
     // Background prefetch lifecycle — added by the `patch_prefetch_state`
     // mpv patch. Values: idle | loading | ready | used. Observed as a

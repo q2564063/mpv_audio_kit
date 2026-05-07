@@ -593,7 +593,8 @@ abstract class _PlayerBase {
       // instead of clamping -1 to 0, which would incorrectly mark the first item.
       final idx = currentIndex >= 0
           ? currentIndex
-          : _state.playlist.index.clamp(0, medias.isEmpty ? 0 : medias.length - 1);
+          : _state.playlist.index
+              .clamp(0, medias.isEmpty ? 0 : medias.length - 1);
       final playlist = Playlist(medias, index: idx);
       _patchState((s) => s.copyWith(playlist: playlist));
       _playlistCtrl.add(playlist);

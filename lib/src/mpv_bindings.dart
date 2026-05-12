@@ -472,6 +472,9 @@ class MpvLibrary {
     } else if (Platform.isAndroid) {
       // Precompiled in android/src/main/jniLibs/<abi>/libmpv.so
       return 'libmpv.so';
+    } else if (Platform.operatingSystem == 'ohos') {
+      // Bundled via HAR libs/arm64-v8a/libmpv.so
+      return 'libmpv.so';
     }
     throw MpvLibraryException(
         'Platform not supported: ${Platform.operatingSystem}');

@@ -1,9 +1,11 @@
 {
   "name": "mpv_audio_kit",
   "version": "1.0.0",
-  "description": "Please describe the basic information.",
+  "description": "Flutter audio player built on top of libmpv for OHOS.",
   "main": "index.ets",
   "author": "",
-  "license": "Apache-2.0",
-  "dependencies": {}
+  "license": "BSD-3-Clause",
+  "dependencies": {
+    "@ohos/flutter_ohos": "file:./har/flutter.har"
+  }
 }

@@ -72,7 +72,7 @@ abstract final class MpvAudioKit {
   /// to ensure proper parsing of floating-point numbers regardless of the
   /// user's system language settings (e.g., using a dot instead of a comma).
   static void _applyPlatformQuirks() {
-    if (Platform.isWindows || Platform.isAndroid) {
+    if (Platform.isWindows || Platform.isAndroid || Platform.isOhos) {
       return;
     }
 

@@ -369,6 +369,259 @@ PYEOF
 }
 
 ###############################################################################
+# Step 3b: Patch ao_opensles.c for OHOS (use OH-specific BufferQueue API)
+###############################################################################
+patch_opensles_for_ohos() {
+    info "Patching ao_opensles.c for OHOS compatibility ..."
+
+    local AO_FILE="$BUILD_DIR/mpv-${MPV_VERSION}/audio/out/ao_opensles.c"
+
+    # OHOS OpenSL ES key differences from Android/standard:
+    #   1. No OpenSLES_Android.h — no float PCM, no AndroidConfiguration
+    #   2. Must use SLOHBufferQueueItf (from OpenSLES_OpenHarmony.h)
+    #      instead of standard SLBufferQueueItf
+    #   3. Must use SL_IID_OH_BUFFERQUEUE instead of SL_IID_BUFFERQUEUE
+    #   4. Callback signature: (SLOHBufferQueueItf, void*, SLuint32 size)
+    #   5. Must call GetBuffer() to obtain writable buffer, then Enqueue()
+    #   6. Do NOT manually invoke the callback — system triggers it after
+    #      SetPlayState(PLAYING)
+    # Reference: OpenHarmony docs "使用OpenSL ES开发音频播放功能"
+
+    cat > "$AO_FILE" << 'OPENSLES_OHOS_EOF'
+/*
+ * OpenSL ES audio output driver — OHOS (OpenHarmony) adaptation.
+ * Based on the original Android OpenSL ES driver by Ilya Zhuravlev.
+ *
+ * OHOS only supports a subset of OpenSL ES 1.0.1 with OH-specific extensions:
+ *   - SLOHBufferQueueItf replaces SLBufferQueueItf
+ *   - SL_IID_OH_BUFFERQUEUE replaces SL_IID_BUFFERQUEUE
+ *   - No float PCM support (integer S16 only)
+ *   - Callback: system calls it when buffer is needed; use GetBuffer+Enqueue
+ *
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ */
+
+#include "ao.h"
+#include "internal.h"
+#include "common/msg.h"
+#include "audio/format.h"
+#include "options/m_option.h"
+#include "osdep/threads.h"
+#include "osdep/timer.h"
+
+#include <SLES/OpenSLES.h>
+#include <SLES/OpenSLES_OpenHarmony.h>
+#include <SLES/OpenSLES_Platform.h>
+
+struct priv {
+    SLObjectItf sl, output_mix, player;
+    SLOHBufferQueueItf buffer_queue;
+    SLEngineItf engine;
+    SLPlayItf play;
+    mp_mutex buffer_lock;
+
+    int bytes_per_frame;
+    int buffer_size_in_ms;
+};
+
+#define DESTROY(thing) \
+    if (p->thing) { \
+        (*p->thing)->Destroy(p->thing); \
+        p->thing = NULL; \
+    }
+
+static void uninit(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+
+    if (p->play)
+        (*p->play)->SetPlayState(p->play, SL_PLAYSTATE_STOPPED);
+
+    DESTROY(player);
+    DESTROY(output_mix);
+    DESTROY(sl);
+
+    p->buffer_queue = NULL;
+    p->engine = NULL;
+    p->play = NULL;
+
+    mp_mutex_destroy(&p->buffer_lock);
+}
+
+#undef DESTROY
+
+static void buffer_callback(SLOHBufferQueueItf buffer_queue, void *context,
+                             SLuint32 size)
+{
+    struct ao *ao = context;
+    struct priv *p = ao->priv;
+
+    mp_mutex_lock(&p->buffer_lock);
+
+    /* OHOS pattern: GetBuffer → fill → Enqueue */
+    SLuint8 *buf = NULL;
+    SLuint32 buf_size = 0;
+    SLresult res = (*buffer_queue)->GetBuffer(buffer_queue, &buf, &buf_size);
+    if (res != SL_RESULT_SUCCESS || !buf || buf_size == 0) {
+        mp_mutex_unlock(&p->buffer_lock);
+        return;
+    }
+
+    /* Use the actual buffer size from GetBuffer, not our own calculation */
+    int frames = (int)(buf_size / (SLuint32)p->bytes_per_frame);
+    if (frames <= 0) {
+        mp_mutex_unlock(&p->buffer_lock);
+        return;
+    }
+
+    double delay = frames / (double)ao->samplerate;
+    void *buf_ptr = (void *)buf;
+    ao_read_data(ao, &buf_ptr, frames,
+        mp_time_ns() + MP_TIME_S_TO_NS(delay), NULL, true, true);
+
+    res = (*buffer_queue)->Enqueue(buffer_queue, buf, buf_size);
+    if (res != SL_RESULT_SUCCESS)
+        MP_ERR(ao, "Failed to Enqueue: %ld\n", (long)res);
+
+    mp_mutex_unlock(&p->buffer_lock);
+}
+
+#define CHK(stmt) \
+    { \
+        SLresult res = stmt; \
+        if (res != SL_RESULT_SUCCESS) { \
+            MP_ERR(ao, "%s: %ld\n", #stmt, (long)res); \
+            goto error; \
+        } \
+    }
+
+static int init(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    SLDataLocator_BufferQueue locator_buffer_queue;
+    SLDataLocator_OutputMix locator_output_mix;
+    SLDataFormat_PCM pcm;
+    SLDataSource audio_source;
+    SLDataSink audio_sink;
+
+    /* OHOS supports stereo */
+    mp_chmap_from_channels(&ao->channels, 2);
+    ao->samplerate = MPCLAMP(ao->samplerate, 8000, 192000);
+
+    /* OHOS: integer PCM only, S16 */
+    ao->format = AF_FORMAT_S16;
+    p->bytes_per_frame = ao->channels.num * af_fmt_to_bytes(ao->format);
+
+    CHK(slCreateEngine(&p->sl, 0, NULL, 0, NULL, NULL));
+    CHK((*p->sl)->Realize(p->sl, SL_BOOLEAN_FALSE));
+    CHK((*p->sl)->GetInterface(p->sl, SL_IID_ENGINE, (void*)&p->engine));
+    CHK((*p->engine)->CreateOutputMix(p->engine, &p->output_mix, 0, NULL, NULL));
+    CHK((*p->output_mix)->Realize(p->output_mix, SL_BOOLEAN_FALSE));
+
+    locator_buffer_queue.locatorType = SL_DATALOCATOR_BUFFERQUEUE;
+    locator_buffer_queue.numBuffers = 4;
+
+    pcm.formatType = SL_DATAFORMAT_PCM;
+    pcm.numChannels = ao->channels.num;
+    pcm.bitsPerSample = SL_PCMSAMPLEFORMAT_FIXED_16;
+    pcm.containerSize = 16;
+    pcm.channelMask = SL_SPEAKER_FRONT_LEFT | SL_SPEAKER_FRONT_RIGHT;
+    pcm.endianness = SL_BYTEORDER_LITTLEENDIAN;
+    pcm.samplesPerSec = ao->samplerate * 1000;
+
+    if (p->buffer_size_in_ms) {
+        ao->device_buffer = ao->samplerate * p->buffer_size_in_ms / 1000;
+        ao->def_buffer = 0;
+    }
+
+    int r = mp_mutex_init(&p->buffer_lock);
+    if (r) {
+        MP_ERR(ao, "Failed to initialize the mutex: %d\n", r);
+        goto error;
+    }
+
+    audio_source.pFormat = (void*)&pcm;
+    audio_source.pLocator = (void*)&locator_buffer_queue;
+
+    locator_output_mix.locatorType = SL_DATALOCATOR_OUTPUTMIX;
+    locator_output_mix.outputMix = p->output_mix;
+
+    audio_sink.pLocator = (void*)&locator_output_mix;
+    audio_sink.pFormat = NULL;
+
+    /* OHOS: pass 0 interfaces; obtain SL_IID_OH_BUFFERQUEUE after Realize */
+    CHK((*p->engine)->CreateAudioPlayer(p->engine, &p->player, &audio_source,
+        &audio_sink, 0, NULL, NULL));
+
+    CHK((*p->player)->Realize(p->player, SL_BOOLEAN_FALSE));
+    CHK((*p->player)->GetInterface(p->player, SL_IID_PLAY, (void*)&p->play));
+
+    /* OHOS: must use SL_IID_OH_BUFFERQUEUE */
+    CHK((*p->player)->GetInterface(p->player, SL_IID_OH_BUFFERQUEUE,
+        (void*)&p->buffer_queue));
+    CHK((*p->buffer_queue)->RegisterCallback(p->buffer_queue,
+        buffer_callback, ao));
+
+    /* Do NOT start playing here — wait for start() so mpv's audio
+     * pipeline is ready to supply data when the callback fires. */
+
+    return 1;
+error:
+    uninit(ao);
+    return -1;
+}
+
+#undef CHK
+
+static void reset(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    /* OHOS: use PAUSED instead of STOPPED.
+     * STOPPED may fully tear down the playback pipeline, preventing
+     * the system from re-triggering callbacks on subsequent PLAYING. */
+    (*p->play)->SetPlayState(p->play, SL_PLAYSTATE_PAUSED);
+    (*p->buffer_queue)->Clear(p->buffer_queue);
+}
+
+static void start(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    /* OHOS: system will invoke buffer_callback when it needs data */
+    (*p->play)->SetPlayState(p->play, SL_PLAYSTATE_PLAYING);
+}
+
+#define OPT_BASE_STRUCT struct priv
+
+const struct ao_driver audio_out_opensles = {
+    .description = "OpenSL ES audio output",
+    .name      = "opensles",
+    .init      = init,
+    .uninit    = uninit,
+    .reset     = reset,
+    .start     = start,
+
+    .priv_size = sizeof(struct priv),
+    .priv_defaults = &(const struct priv) {
+        .buffer_size_in_ms = 250,
+    },
+    .options = (const struct m_option[]) {
+        {"buffer-size-in-ms", OPT_INT(buffer_size_in_ms),
+            M_RANGE(0, 500)},
+        {0}
+    },
+    .options_prefix = "opensles",
+};
+OPENSLES_OHOS_EOF
+
+    info "Patched ao_opensles.c for OHOS (OH BufferQueue API)"
+}
+
+###############################################################################
 # Step 4: Build mpv (libmpv only, audio-only)
 ###############################################################################
 build_mpv() {
@@ -382,6 +635,9 @@ build_mpv() {
 
     # Patch for audio-only build
     patch_mpv_for_audio_only
+
+    # Patch OpenSL ES for OHOS compatibility
+    patch_opensles_for_ohos
 
     # Remove old build directory if exists
     rm -rf build-ohos
@@ -431,6 +687,7 @@ CROSSEOF
         -Dtests=false \
         -Dgl=disabled \
         -Dplain-gl=disabled \
+        -Dopensles=enabled \
         -Dzlib=enabled \
         -Db_lto=true
 

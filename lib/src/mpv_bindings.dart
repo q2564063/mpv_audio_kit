@@ -311,13 +311,14 @@ typedef _MpvClientApiVersionNative = UnsignedLong Function();
 typedef MpvClientApiVersion = int Function();
 
 // int mpv_hook_add(mpv_handle *ctx, uint64_t reply_userdata, const char *name, int priority)
-typedef _MpvHookAddNative = Int32 Function(
-    Pointer<MpvHandle> ctx, Uint64 replyUserdata, Pointer<Utf8> name, Int32 priority);
-typedef MpvHookAdd = int Function(
-    Pointer<MpvHandle> ctx, int replyUserdata, Pointer<Utf8> name, int priority);
+typedef _MpvHookAddNative = Int32 Function(Pointer<MpvHandle> ctx,
+    Uint64 replyUserdata, Pointer<Utf8> name, Int32 priority);
+typedef MpvHookAdd = int Function(Pointer<MpvHandle> ctx, int replyUserdata,
+    Pointer<Utf8> name, int priority);
 
 // int mpv_hook_continue(mpv_handle *ctx, uint64_t id)
-typedef _MpvHookContinueNative = Int32 Function(Pointer<MpvHandle> ctx, Uint64 id);
+typedef _MpvHookContinueNative = Int32 Function(
+    Pointer<MpvHandle> ctx, Uint64 id);
 typedef MpvHookContinue = int Function(Pointer<MpvHandle> ctx, int id);
 
 // ---------------------------------------------------------------------------
@@ -472,7 +473,7 @@ class MpvLibrary {
     } else if (Platform.isAndroid) {
       // Precompiled in android/src/main/jniLibs/<abi>/libmpv.so
       return 'libmpv.so';
-    } else if (Platform.operatingSystem == 'ohos') {
+    } else if (Platform.isOhos) {
       // Bundled via HAR libs/arm64-v8a/libmpv.so
       return 'libmpv.so';
     }

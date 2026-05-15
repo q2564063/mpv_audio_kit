@@ -76,6 +76,9 @@ class Player extends _PlayerBase
     final normalizedUri = await AndroidHelper.normalizeUri(media.uri);
     _mediaCache[normalizedUri] = media;
     _pendingPlay = play ?? configuration.autoPlay;
+    if (!_pendingPlay) {
+      _prop('pause', 'yes');
+    }
     final args = ['loadfile', normalizedUri, 'replace'];
     if (startPosition != null && startPosition > Duration.zero) {
       final secs = (startPosition.inMilliseconds / 1000.0).toStringAsFixed(3);
